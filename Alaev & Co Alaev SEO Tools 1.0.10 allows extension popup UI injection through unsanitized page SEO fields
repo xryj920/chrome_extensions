@@ -1,0 +1,270 @@
+## Title
+
+Alaev & Co Alaev SEO Tools 1.0.10 allows extension popup UI injection through unsanitized page SEO fields
+
+## Affected Product
+
+- Vendor: Alaev & Co
+- Product: Alaev SEO Tools: Free Audit & Analysis Chrome extension
+- Chrome Web Store ID: `fgojlclhaecajjkchbcpelngbkdjeekg`
+- Affected version: 1.0.10
+- Platform: Google Chrome / Chromium-based browsers supporting browser extensions
+- Product URL: `https://chromewebstore.google.com/detail/alaev-seo-tools-free-audi/fgojlclhaecajjkchbcpelngbkdjeekg`
+
+## Vulnerability Type
+
+- Primary weakness: Improper neutralization of page-controlled HTML in extension popup UI
+- Suggested CWE: CWE-79, Improper Neutralization of Input During Web Page Generation
+- Alternative CWE: CWE-116, Improper Encoding or Escaping of Output
+- Vulnerability class: HTML injection / extension popup UI injection
+
+## Summary
+
+Alaev SEO Tools: Free Audit & Analysis Chrome extension version 1.0.10 renders page-controlled SEO fields as HTML inside the extension popup.
+
+The extension collects values such as the current page title, meta description, meta keywords, and headings from the active tab. These values are controlled by the webpage. The popup receives the collected data through `chrome.tabs.sendMessage()` and then assigns some of those strings to `innerHTML`.
+
+As a result, a malicious webpage can inject attacker-controlled HTML markup into the extension popup UI. The confirmed impact is extension-popup UI injection: the attacker can alter what the trusted extension popup displays for that page, including misleading SEO audit messages, fake warnings, injected links, or layout elements that visually appear to come from the extension.
+
+No confirmed extension-context JavaScript execution is claimed. Chrome extension Content Security Policy may block inline script or event-handler execution. The confirmed issue is that untrusted webpage content is reparsed as HTML inside a trusted browser-extension surface.
+
+The vendor has acknowledged the finding and stated that the issue will be fixed in the next update. Vendor confirmation is available privately on request.
+
+## Impact
+
+Successful exploitation affects the integrity of the extension popup UI. A malicious webpage can influence the displayed SEO audit result for that page by injecting HTML into fields that users expect to be generated and controlled by the extension.
+
+This can be used to display fake audit results, misleading warnings, deceptive links, layout overlays, or other attacker-controlled markup inside the extension popup. The issue does not by itself demonstrate account takeover, arbitrary code execution, or access to extension-private data.
+
+## Technical Details
+
+The extension uses `src/popup.html` as the browser action popup and injects a content script into HTTP and HTTPS pages:
+
+```json
+"action": {
+  "default_popup": "src/popup.html"
+},
+"host_permissions": [
+  "http://*/*",
+  "https://*/*"
+],
+"content_scripts": [
+  {
+    "js": [
+      "assets/content_script.ts-loader-DolH9luq.js"
+    ],
+    "matches": [
+      "https://*/*",
+      "http://*/*"
+    ],
+    "run_at": "document_start"
+  }
+]
+```
+
+The content script collects page-controlled SEO data from the active tab.
+
+For meta tags, it reads the page's `content` attribute:
+
+```javascript
+T = t => {
+    const n = {};
+    return h(t, "meta").forEach(a => {
+        var r;
+        let o = a.getAttribute("name");
+        !o && (o = a.getAttribute("property"), !o) || (
+            o = o.toLowerCase(),
+            n[o] || (n[o] = []),
+            n[o].push({
+                content: a.getAttribute("content"),
+                invalidPosition: ((r = a.parentElement) == null ? void 0 : r.nodeName) !== "HEAD"
+            })
+        )
+    }), n
+}
+```
+
+For title elements, it stores `innerText`:
+
+```javascript
+A = t => h(t, "title").map(e => ({
+    innerText: e.innerText,
+    isFromHead: !!e.closest("head")
+}))
+```
+
+For headings, it stores `textContent`:
+
+```javascript
+S = t => h(t, "body h1, body h2, body h3, body h4, body h5, body h6").map(e => ({
+    textContent: e.textContent,
+    nodeName: e.nodeName
+}))
+```
+
+Those values are returned to the popup through the `init_review_tab` action:
+
+```javascript
+chrome.runtime.onMessage.addListener((t, n, e) => {
+    switch (t.action) {
+        case "init_review_tab": {
+            const o = M(document, location.hostname);
+            e(o);
+            break
+        }
+    }
+});
+```
+
+In the popup script, the popup requests that data from the active tab:
+
+```javascript
+const {
+    head: W,
+    body: ee,
+    lang: de
+} = await chrome.tabs.sendMessage(s, Fn()), {
+    titles: me,
+    metaTags: R,
+    canonicals: te = [],
+    hreflangs: z = []
+} = W, {
+    description: ue = [],
+    keywords: je = []
+} = R, {
+    headings: Fe = [],
+    aTags: ln = [],
+    imgTags: dn = []
+} = ee;
+```
+
+The issue is that the popup renderer uses `innerHTML` for these page-controlled values.
+
+The shared `addDiv` helper assigns the value directly to `innerHTML`:
+
+```javascript
+static addDiv(t, n, s, i = !1) {
+    const a = document.createElement("div");
+    a.className = s;
+    const p = document.createElement("div");
+    p.classList.add("result");
+    const c = n ? "" : n == "" ? vn : `${Ln} <span class="ball ball__error"></span>`;
+    p.innerHTML = (n ?? "").toString() || c;
+    a.append(p);
+    c && a.classList.add("empty-value");
+    const m = document.querySelector(`#${t}`);
+}
+```
+
+The `Y()` helper passes title and meta values into `addDiv()`:
+
+```javascript
+const Y = (e, t, n, s) => {
+    if (!s.length) {
+        w.addDiv(t, null, e);
+        return
+    }
+    if (s.length === 1) {
+        const i = n ? s[0] && typeof s[0] == "object" ? s[0][n] : "" : s[0];
+        w.addDiv(t, i, e, !0);
+        return
+    }
+    w.addDiv(
+        t,
+        s.map((i, a) => `<span style="color:#999;">${a+1}:</span> ${n ? typeof n != "number" ? i[n] : "" : i}`).join("</br>"),
+        e
+    )
+}
+```
+
+The popup calls this helper for page title, description, and keywords:
+
+```javascript
+Y(oe, "title", "innerText", me.filter(o => o.isFromHead));
+Y(oe, "description", "content", ue);
+Y(oe, "keywords", "content", je);
+```
+
+Headings are also rendered through `innerHTML`:
+
+```javascript
+for (const D of f) {
+    const F = document.createElement("p");
+    F.innerHTML = D.textContent ?? "";
+    q.appendChild(F)
+}
+```
+
+The resulting data flow is:
+
+```text
+malicious page title/meta/heading
+    -> content script collects innerText/content/textContent
+    -> popup receives data through chrome.tabs.sendMessage()
+    -> popup renders those strings with innerHTML
+    -> attacker-controlled markup appears inside the extension popup UI
+```
+
+## Proof of Concept
+
+Create a test page with page-controlled SEO fields:
+
+```html
+<!doctype html>
+<html>
+<head>
+  <title>&lt;b id="alaev-title-test"&gt;Injected title markup&lt;/b&gt;</title>
+  <meta name="description" content="&lt;b id='alaev-meta-test'&gt;Injected meta markup&lt;/b&gt;">
+  <meta name="keywords" content="&lt;b id='alaev-keywords-test'&gt;Injected keywords markup&lt;/b&gt;">
+</head>
+<body>
+  <h1>&lt;b id="alaev-heading-test"&gt;Injected heading markup&lt;/b&gt;</h1>
+</body>
+</html>
+```
+
+Steps to reproduce:
+
+1. Install Alaev SEO Tools: Free Audit & Analysis version 1.0.10.
+2. Open the test page in Chrome.
+3. Click the extension icon to open the extension popup.
+4. Observe that page-controlled values are rendered as HTML elements in the extension popup instead of being displayed as literal text.
+
+Expected safe behavior:
+
+The extension popup should display the title, meta fields, and headings as text.
+
+Observed vulnerable behavior:
+
+The extension popup reparses page-controlled values as HTML and renders attacker-controlled markup inside the extension UI.
+
+## Suggested CVSS
+
+Suggested CVSS v3.1 vector:
+
+`CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:N`
+
+Suggested severity: Medium
+
+Rationale: exploitation can be delivered by a malicious webpage and requires user interaction because the user must open the extension popup for the affected page. The direct confirmed impact is integrity impact to the extension popup UI. No confidentiality or availability impact is claimed, and no confirmed extension-context JavaScript execution is claimed.
+
+If VulDB treats the browser extension popup and the webpage as the same security scope for this UI-only issue, a more conservative vector may be:
+
+`CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N`
+
+## Suggested CVE Description
+
+Alaev & Co Alaev SEO Tools: Free Audit & Analysis Chrome extension 1.0.10 allows extension popup UI injection because page-controlled SEO fields such as title, meta description, meta keywords, and headings are collected from the active tab and later rendered with `innerHTML` inside the extension popup. A malicious webpage can inject HTML markup into the trusted extension popup UI for that page.
+
+## Remediation Suggestions
+
+- Use `textContent` instead of `innerHTML` for page-derived values such as title, meta description, meta keywords, and headings.
+- If formatted output is required, escape page-controlled strings before rendering them.
+- Build extension-generated markup separately from page-controlled strings. For example, create numbering spans as DOM nodes and append page values as text nodes.
+- Apply the same rule to headings by replacing `F.innerHTML = D.textContent ?? ""` with `F.textContent = D.textContent ?? ""`.
+- Review other popup rendering paths for use of `innerHTML` with content derived from the active webpage.
+
+## References
+
+- Chrome Web Store listing: `https://chromewebstore.google.com/detail/alaev-seo-tools-free-audi/fgojlclhaecajjkchbcpelngbkdjeekg`
+- Vendor confirmation: available privately on request
