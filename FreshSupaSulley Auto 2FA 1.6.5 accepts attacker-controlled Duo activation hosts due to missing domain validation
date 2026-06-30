@@ -1,0 +1,165 @@
+## Title
+
+FreshSupaSulley Auto 2FA 1.6.5 accepts attacker-controlled Duo activation hosts due to missing domain validation
+
+## Affected Product
+
+- Vendor: FreshSupaSulley Auto-2FA project
+- Product: Auto 2FA Chrome extension
+- Chrome Web Store ID: `bnfooenhhgcnhdkdjelgmmkpaemlnoek`
+- Affected version: 1.6.5
+- Platform: Google Chrome / Chromium-based browsers supporting Manifest V3 extensions
+- Product URL: `https://chromewebstore.google.com/detail/auto-2fa/bnfooenhhgcnhdkdjelgmmkpaemlnoek`
+- Source repository: `https://github.com/FreshSupaSulley/Auto-2FA`
+
+## Vulnerability Type
+
+- Primary weakness: Improper validation of activation host
+- Suggested CWE: CWE-20, Improper Input Validation
+- Alternative CWE: CWE-346, Origin Validation Error
+- Alternative CWE: CWE-441, Unintended Proxy or Intermediary
+- Vulnerability class: host validation bypass / improper endpoint trust
+
+## Summary
+
+Auto 2FA Chrome extension version 1.6.5 processes Duo activation codes in the format `<id>-<base64_host>`. The host component is decoded from base64 and validated only by string length. The affected code checks that the decoded host is exactly 28 characters, but it does not restrict the host to expected Duo domains such as `*.duosecurity.com` or `*.duofederal.com`.
+
+An attacker can craft an activation code containing a 20-character activation id and a base64-encoded 28-character attacker-controlled hostname. If a user is socially engineered into entering that activation code, the extension accepts the hostname, stores it as the device host, and sends activation and subsequent API requests for that device to the attacker-controlled endpoint.
+
+The confirmed impact is improper trust of an attacker-controlled activation/API endpoint. This can redirect Auto 2FA device traffic to an attacker-controlled server and can expose device credentials generated for that attacker-controlled endpoint. It may also cause denial of service for legitimate Auto 2FA use if the user activates or selects the attacker-controlled device instead of a real Duo device.
+
+The practical severity is reduced by the social engineering requirement and by the fact that credentials generated during activation are scoped to the supplied host. This report does not claim confirmed disclosure of an existing real Duo device credential. The maintainer acknowledged that the missing host validation is a flaw, while disputing the originally suggested high severity. Maintainer confirmation is available privately on request.
+
+## Impact
+
+Successful exploitation allows an attacker to make the extension trust and persist an attacker-controlled Duo API hostname during activation. After activation, Auto 2FA requests for that device are sent to the attacker's server.
+
+Possible impacts include:
+
+- Redirection of Auto 2FA activation and device API traffic to an attacker-controlled host
+- Exposure of device credentials generated for the attacker-controlled host
+- Denial of service or misconfiguration if the user expects the device to work with a legitimate Duo service
+- Potential phishing or proxying scenarios if the attacker implements a Duo-like endpoint and socially engineers the user through activation
+
+The issue does not, by itself, prove theft of an existing real Duo device credential or full account takeover. The attacker must convince the user to enter a malicious activation code.
+
+## Technical Details
+
+The vulnerable activation parsing logic splits the activation code into an id and a base64-encoded host. It then decodes the host and checks only the lengths of the two fields:
+
+```javascript
+let parts = activationCode.split("-");
+let host = atob(parts[1]);
+let id = parts[0];
+
+if (id.length != 20 || host.length != 28)
+    throw "Illegal number of characters in activation code";
+```
+
+The validation checks only:
+
+- activation id length equals 20
+- decoded host length equals 28
+
+No allowlist or suffix validation is applied to ensure that the host belongs to an expected Duo domain.
+
+The host is then used to construct the activation URL:
+
+```javascript
+let url = "https://" + host + "/push/v2/activation/" + id;
+```
+
+The host is also persisted as part of the device:
+
+```javascript
+device.host = host;
+await chrome.storage.sync.set({ [device.pkey]: device });
+```
+
+Later API requests use the stored host:
+
+```javascript
+async function buildRequest(info, method, path, extra = {}) {
+    const host = info.host.trim();
+    const url = `https://${host}${path}${query ? "?" + query : ""}`;
+    return await fetch(url, {
+        method: method.toUpperCase(),
+        headers: {
+            Authorization: "Basic <redacted>",
+            "x-duo-date": date
+        }
+    });
+}
+```
+
+Because the host is persisted and later reused, the initial missing validation affects the future API endpoint trusted by the extension for that device.
+
+The resulting data flow is:
+
+```text
+attacker-crafted activation code
+    -> base64 host decoded by extension
+    -> only host length is checked
+    -> attacker-controlled host is persisted in device storage
+    -> future activation/API requests for that device are sent to attacker host
+```
+
+## Proof of Concept
+
+The following reproduction should be performed only with a controlled test hostname and test activation data.
+
+Prerequisites:
+
+1. Auto 2FA version 1.6.5 is installed.
+2. The tester controls an HTTPS host whose hostname is exactly 28 characters long.
+3. The tester prepares a syntactically valid activation code using a 20-character id and base64-encoded controlled hostname.
+
+High-level reproduction:
+
+1. Create an activation code in the format `<20_character_id>-<base64_28_character_host>`.
+2. Enter the activation code into Auto 2FA.
+3. Observe that the extension accepts the code if the id and decoded host length checks pass.
+4. Observe that the extension constructs an activation URL using the attacker-controlled host.
+5. Observe that the host is persisted in extension storage as the device host.
+6. Observe that subsequent API requests for that device use the persisted attacker-controlled host.
+
+Expected safe behavior:
+
+The extension should reject activation hosts that are not known legitimate Duo API hosts.
+
+Observed vulnerable behavior:
+
+The extension accepts any decoded hostname with the expected length and persists it as the device host.
+
+## Suggested CVSS
+
+Suggested CVSS v3.1 vector:
+
+`CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:L`
+
+Suggested severity: Medium
+
+Rationale: exploitation requires social engineering because the user must enter an attacker-crafted activation code. The attacker-controlled host affects only the device created from that malicious activation flow. The confirmed impacts are limited credential exposure for the attacker-controlled device, integrity impact through improper endpoint trust, and possible availability impact through misconfiguration or denial of legitimate Auto 2FA operation. This report does not claim theft of existing real Duo credentials or confirmed account takeover.
+
+If VulDB considers the browser extension's trust boundary and the persisted attacker-controlled endpoint to create broader cross-component impact, the following alternative vector may be considered:
+
+`CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:L/A:L`
+
+## Suggested CVE Description
+
+FreshSupaSulley Auto 2FA Chrome extension 1.6.5 accepts attacker-controlled Duo activation hosts because the decoded host portion of an activation code is validated only by length. A crafted activation code containing a 20-character id and a base64-encoded 28-character attacker-controlled hostname can cause the extension to persist the attacker host and send activation and subsequent API requests for that device to the attacker-controlled endpoint.
+
+## Remediation Suggestions
+
+- Validate decoded activation hosts against a strict allowlist, such as expected Duo domains.
+- Reject activation hosts that do not match known Duo API host patterns.
+- Do not persist a host derived from an activation code until the host has passed domain validation.
+- Display the resolved host to the user before activation and warn if it is not a recognized Duo domain.
+- Consider validating the activation response cryptographically or otherwise binding activation to a known legitimate Duo service endpoint.
+- Add regression tests for malformed activation codes and non-Duo hostnames with valid lengths.
+
+## References
+
+- Chrome Web Store listing: `https://chromewebstore.google.com/detail/auto-2fa/bnfooenhhgcnhdkdjelgmmkpaemlnoek`
+- Source repository: `https://github.com/FreshSupaSulley/Auto-2FA`
+- Maintainer confirmation: available privately on request
