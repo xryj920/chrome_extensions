@@ -1,10 +1,10 @@
 ## Title
 
-FreshSupaSulley Auto 2FA 1.6.5 accepts attacker-controlled Duo activation hosts due to missing domain validation
+Erich Boschert Auto 2FA 1.6.5 accepts attacker-controlled Duo activation hosts due to missing domain validation
 
 ## Affected Product
 
-- Vendor: FreshSupaSulley Auto-2FA project
+- Vendor: Erich Boschert
 - Product: Auto 2FA Chrome extension
 - Chrome Web Store ID: `bnfooenhhgcnhdkdjelgmmkpaemlnoek`
 - Affected version: 1.6.5
