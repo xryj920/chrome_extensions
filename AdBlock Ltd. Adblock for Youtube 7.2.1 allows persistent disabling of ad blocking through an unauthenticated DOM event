@@ -1,0 +1,181 @@
+## Title
+
+AdBlock Ltd. Adblock for Youtube 7.2.1 allows persistent disabling of ad blocking through an unauthenticated DOM event
+
+## Affected Product
+
+- Vendor: AdBlock Ltd.
+- Product: Adblock for Youtube Chrome extension
+- Chrome Web Store ID: `cmedhionkhpnakcndndgjdbohmhepckk`
+- Affected version: 7.2.1
+- Platform: Google Chrome / Chromium-based browsers supporting Manifest V3 extensions
+- Product URL: `https://chromewebstore.google.com/detail/adblock-for-youtube/cmedhionkhpnakcndndgjdbohmhepckk`
+
+## Vulnerability Type
+
+- Primary weakness: Improper validation of event origin / authenticity
+- Suggested CWE: CWE-346, Origin Validation Error
+- Alternative CWE: CWE-693, Protection Mechanism Failure
+- Vulnerability class: security feature bypass / unauthorized persistent configuration change
+
+## Summary
+
+Adblock for Youtube Chrome extension version 7.2.1 contains a content-script event listener on YouTube pages that accepts the hard-coded DOM event `yt-anti-adblock-detected` as authority to change the extension's persistent ad-blocking setting.
+
+When this event is received while ad blocking is enabled, the content script writes `ads = false` into the extension's own `chrome.storage.local`. The background script observes this storage change, removes the current dynamic Declarative Net Request rules, and returns without adding the ad-blocking rules back because the `ads` setting is now false.
+
+As a result, a script executing in the YouTube page environment, or a co-installed browser extension with access to YouTube pages, can persistently disable the target extension's core ad-blocking behavior by dispatching one synthetic DOM event. The attacker does not need direct access to the target extension's private storage or declarativeNetRequest rules; the vulnerable extension performs the persistent state change and rule removal itself.
+
+The vendor has confirmed the finding and stated that a fix is planned. The vendor noted that the fix requires coordinated changes in both the extension and anti-adblock code.
+
+## Impact
+
+Successful exploitation disables the extension's primary ad-blocking functionality on YouTube by changing the extension's persistent configuration and removing dynamic DNR rules. This undermines the integrity and availability of the extension's security/privacy functionality.
+
+The impact is not account takeover or arbitrary code execution. The practical risk is unauthorized persistent modification of a browser extension's protection state from an unauthenticated page-observable signal.
+
+## Technical Details
+
+The extension injects a content script broadly:
+
+```json
+"content_scripts": [
+  {
+    "matches": ["http://*/*", "https://*/*"],
+    "js": ["contentscript.js"],
+    "all_frames": true,
+    "run_at": "document_start"
+  }
+]
+```
+
+The relevant logic proceeds on YouTube pages because the content script uses a broad URL check:
+
+```javascript
+var isAdBlockWorksOnPage = function(url) {
+    return /youtube\.com/.test(url);
+};
+```
+
+The content script defines stable hard-coded event names:
+
+```javascript
+var DISABLE_EVENT_NAME = 'yt-anti-adblock-detected';
+var ENABLE_EVENT_NAME = 'yt-anti-adblock-rejected';
+```
+
+The content script registers a listener for `yt-anti-adblock-detected`. If the current Ads setting is enabled, receiving the event causes the extension to write `false` into its persistent local storage:
+
+```javascript
+window.addEventListener(DISABLE_EVENT_NAME, async function() {
+    await setToChromeStorage(SettingsKeys.Ads, false);
+});
+```
+
+The storage write uses `chrome.storage.local.set`, meaning the resulting state persists beyond the current page:
+
+```javascript
+var setToChromeStorage = function(key, value) {
+    return new Promise(function(resolve, reject) {
+        var _a;
+        chrome.storage.local.set((_a = {}, _a[key] = value, _a), function() {
+            if (chrome.runtime.lastError) {
+                reject(chrome.runtime.lastError);
+            }
+            resolve();
+        });
+    });
+};
+```
+
+No validation was found around the event source, such as a private nonce, extension-only messaging channel, user gesture requirement, or `event.isTrusted` check. A normal synthetic DOM event is sufficient.
+
+On the background side, the extension watches storage changes for the Ads setting. When the setting changes, the background updates its in-memory state and refreshes the dynamic rules:
+
+```javascript
+if (![SettingsKeys.Ads, SettingsKeys.Annotations].includes(key))
+    continue;
+
+Settings[key] = newValue;
+
+await updateDynamicRules();
+```
+
+The dynamic rule update path first removes existing dynamic DNR rules:
+
+```javascript
+existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+removeRuleIds = existingRules.map(function(r) { return r.id; });
+
+await chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: removeRuleIds
+});
+```
+
+If `Settings[SettingsKeys.Ads]` is false, the function exits before restoring the ad-blocking rules:
+
+```javascript
+await deleteAllDynamicRules();
+
+if (!Settings[SettingsKeys.Ads])
+    return;
+
+await addDynamicRulesFromRegexesArray();
+```
+
+This creates a complete chain from unauthenticated DOM event to persistent configuration change to removal of active ad-blocking rules.
+
+## Proof of Concept
+
+Prerequisites:
+
+- Adblock for Youtube version 7.2.1 is installed.
+- Ad blocking is enabled in the extension.
+- A YouTube page is open.
+- The attacker can execute JavaScript in the YouTube page environment or through a co-installed extension with access to YouTube pages.
+
+Minimal trigger:
+
+```javascript
+window.dispatchEvent(new Event("yt-anti-adblock-detected"));
+```
+
+Expected result:
+
+1. The content script receives the synthetic `yt-anti-adblock-detected` event.
+2. The extension writes `ads: false` into its own `chrome.storage.local`.
+3. The background storage-change handler calls the dynamic rule update path.
+4. Existing dynamic DNR rules are removed.
+5. Because `ads` is now false, the ad-blocking rules are not restored.
+6. The ad-blocking state remains disabled persistently until changed again.
+
+## Suggested CVSS
+
+Suggested CVSS v3.1 vector:
+
+`CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:C/C:N/I:L/A:L`
+
+Suggested severity: Medium
+
+Rationale: exploitation requires the vulnerable extension to be installed and requires either same-page script execution on YouTube or a co-installed extension with YouTube page access. The direct impact is unauthorized persistent modification of the vulnerable extension's protection state, affecting integrity and availability of its ad-blocking functionality, without known confidentiality impact.
+
+If VulDB treats a same-page web script context as network-originated, an alternative vector may be considered:
+
+`CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:N/I:L/A:L`
+
+## Suggested CVE Description
+
+AdBlock Ltd. Adblock for Youtube Chrome extension 7.2.1 allows an unauthorized persistent configuration change through an unauthenticated DOM event. A script executing in the YouTube page context, or a co-installed extension with access to YouTube pages, can dispatch the hard-coded `yt-anti-adblock-detected` event, causing the extension to write `ads = false` to `chrome.storage.local`, remove dynamic Declarative Net Request rules, and persistently disable the extension's ad-blocking functionality.
+
+## Remediation Suggestions
+
+- Do not use page-observable DOM events as authority to change persistent extension settings.
+- Move this control path to an extension-only channel such as `chrome.runtime.sendMessage`, or to content-script internal state that cannot be triggered by arbitrary page scripts.
+- If a page-side signal is required, use a private nonce or one-time token generated by the extension and do not expose a stable hard-coded event contract.
+- Require explicit user confirmation in extension-controlled UI before disabling ad-blocking functionality or removing DNR rules.
+- Avoid directly coupling an unauthenticated event to persistent storage writes and DNR rule removal.
+
+## References
+
+- Chrome Web Store listing: `https://chromewebstore.google.com/detail/adblock-for-youtube/cmedhionkhpnakcndndgjdbohmhepckk`
+- Vendor confirmation: available privately on request
