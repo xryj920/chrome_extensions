@@ -1,0 +1,170 @@
+## Title
+
+BEN Group, Inc. TubeBuddy for YouTube 5.8.4 allows authentication token overwrite through an unauthenticated redirect URL handler
+
+## Affected Product
+
+- Vendor: BEN Group, Inc.
+- Product: TubeBuddy for YouTube Chrome extension
+- Chrome Web Store ID: `mhkhmbddkmdggbhaaaodilponhnccicb`
+- Affected version: 5.8.4, build 2076
+- Platform: Google Chrome / Chromium-based browsers supporting Manifest V3 extensions
+- Product URL: `https://chromewebstore.google.com/detail/tubebuddy-for-youtube/mhkhmbddkmdggbhaaaodilponhnccicb`
+- Vendor website: `https://www.tubebuddy.com/`
+
+## Vulnerability Type
+
+- Primary weakness: Missing validation of OAuth-like redirect parameters before persisting an authentication token
+- Suggested CWE: CWE-345, Insufficient Verification of Data Authenticity
+- Alternative CWE: CWE-384, Session Fixation
+- Alternative CWE: CWE-601, URL Redirection to Untrusted Site
+- Vulnerability class: authentication state corruption / session fixation / open redirect
+
+## Summary
+
+TubeBuddy for YouTube Chrome extension version 5.8.4, build 2076, contains a content script that runs on `https://www.tubebuddy.com/redirect*`. The script reads URL query parameters including `t` for token, `c` for channel id, and `r` for redirect target. It then writes the token directly into Chrome synced storage under the key `tubebuddyToken-<channel id>`.
+
+The token write is performed without validating that the request originated from a legitimate authentication flow. The affected flow does not enforce a state or nonce value, does not validate the token format or signature before persisting it, and does not restrict the `r` redirect parameter to trusted destinations.
+
+An attacker can craft a `tubebuddy.com/redirect?...` URL that overwrites the stored TubeBuddy token for a chosen channel id. The injected value is later read from extension storage and attached to outbound TubeBuddy backend requests as `currentChannelToken`.
+
+The confirmed impact is unauthorized authentication-state overwrite in the extension, which can cause denial of service or account-state corruption for the affected channel. The `r` parameter also creates an open redirect that can be used to disguise a phishing flow as a TubeBuddy link. If the backend accepts a swapped `currentChannelToken` without binding it to the corresponding channel id and account, the issue may become a session fixation or account confusion vulnerability. That server-side condition was not verified in the provided record.
+
+## Impact
+
+Successful exploitation allows an attacker to make the extension persist an attacker-controlled token value for a selected channel id by causing the victim to open a crafted TubeBuddy redirect URL.
+
+Confirmed impacts include:
+
+- Overwrite of `tubebuddyToken-<channel id>` in extension synced storage
+- Corruption of the extension's authentication state for the affected channel
+- Subsequent transmission of the attacker-controlled token value to TubeBuddy backend endpoints as `currentChannelToken`
+- Denial of service or broken TubeBuddy functionality for the affected channel
+- Open redirect behavior through the `r` parameter, which can support phishing or deceptive link flows
+
+Potential but unconfirmed impacts include session fixation or cross-account/channel confusion if server-side validation does not cryptographically bind `currentChannelToken` to the current channel id and account.
+
+This report does not claim confirmed cross-account takeover. The server-side token-to-channel binding behavior was not verified.
+
+## Technical Details
+
+The affected redirect content script runs on:
+
+```text
+https://www.tubebuddy.com/redirect*
+```
+
+The script reads query parameters and writes the supplied token to extension synced storage:
+
+```javascript
+const params = new URLSearchParams(window.location.search);
+
+chrome.storage.sync.set({
+  [`tubebuddyToken-${params.get("c")}`]: params.get("t")
+});
+
+window.location.href = params.get("r");
+```
+
+The following controls are missing before the token is persisted:
+
+- No verification that the redirect request originated from a legitimate TubeBuddy authentication flow
+- No state or nonce binding to a flow initiated by the extension
+- No token format or signature validation before storage
+- No allowlist validation for the `r` redirect URL
+- No user-visible confirmation before overwriting an existing channel token
+
+The injected token is subsequently used by the extension. Static analysis of the shipped 5.8.4 bundle showed that `tubebuddymaster1.js` reads `tubebuddyToken-<currentChannelId>` through `GetDbValue(tokenKey + CurrentChannelId())` and exposes it through `GetToken()`.
+
+The same module attaches the token to outbound requests as:
+
+```javascript
+headers.currentChannelToken = TBGlobal.GetToken();
+```
+
+The request headers are then forwarded into actual requests to TubeBuddy backend endpoints by modules such as `FetchUtilities.js` and `destBackground.js`.
+
+The resulting data flow is:
+
+```text
+crafted https://www.tubebuddy.com/redirect URL
+    -> query parameter t is read as token
+    -> query parameter c is read as channel id
+    -> extension writes tubebuddyToken-<c> = t to chrome.storage.sync
+    -> later extension code reads tubebuddyToken-<currentChannelId>
+    -> value is sent to TubeBuddy backend as currentChannelToken
+```
+
+## Proof of Concept
+
+The following reproduction should be performed only with channels and tokens controlled by the researcher.
+
+Prerequisites:
+
+1. TubeBuddy for YouTube version 5.8.4, build 2076, is installed.
+2. The tester controls the target YouTube channel and TubeBuddy installation.
+3. The tester has a controlled token value for demonstration.
+
+High-level reproduction:
+
+1. Confirm the current stored token for a controlled channel id:
+
+```text
+tubebuddyToken-<channel_id> = <original_token>
+```
+
+2. Open a crafted redirect URL:
+
+```text
+https://www.tubebuddy.com/redirect?t=<controlled_token>&c=<channel_id>&r=https%3A%2F%2Fexample.com
+```
+
+3. Observe that the page silently writes the supplied token value to extension synced storage and redirects to the `r` URL.
+
+4. Re-read extension storage:
+
+```text
+tubebuddyToken-<channel_id> = <controlled_token>
+```
+
+5. Observe that subsequent extension requests for that channel use the overwritten value as `currentChannelToken`.
+
+Expected safe behavior:
+
+The extension should reject redirect token writes unless they are bound to a legitimate authentication flow initiated by the extension or backend.
+
+Observed vulnerable behavior:
+
+The extension accepts token and channel id values from URL query parameters and overwrites the stored token without validation.
+
+## Suggested CVSS
+
+Suggested CVSS v3.1 vector:
+
+`CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:L`
+
+Suggested severity: Medium
+
+Rationale: exploitation can be delivered through a crafted web link and requires user interaction because the victim must open the link. The attack crosses the web-to-extension trust boundary and can modify the extension's authentication state for a TubeBuddy channel. Integrity impact is low for confirmed token overwrite and state corruption. Availability impact is low because the overwrite can disrupt extension functionality for the affected channel. No confirmed confidentiality impact or cross-account takeover is claimed.
+
+If the backend accepts a token for one channel/account as valid for another channel/account, a higher score may be appropriate because the issue would become session fixation or account confusion.
+
+## Suggested CVE Description
+
+BEN Group, Inc. TubeBuddy for YouTube Chrome extension 5.8.4 build 2076 allows authentication token overwrite through an unauthenticated redirect URL handler. A content script running on `https://www.tubebuddy.com/redirect*` reads `t`, `c`, and `r` query parameters and writes `t` into synced extension storage as `tubebuddyToken-<c>` without validating a state value, token authenticity, or redirect target. The overwritten value is later sent to TubeBuddy backend requests as `currentChannelToken`.
+
+## Remediation Suggestions
+
+- Treat `https://www.tubebuddy.com/redirect` as an authentication callback and require a state or nonce value generated at flow start.
+- Verify the state or nonce before writing any token to extension storage.
+- Reject token writes that do not originate from a legitimate server-initiated authentication flow.
+- Validate token format and authenticity before persisting a token.
+- Enforce an allowlist for the `r` redirect parameter.
+- Require user-visible confirmation before overwriting an existing channel token.
+- Server-side, ensure that `currentChannelToken` is cryptographically bound to the corresponding `currentChannelId` and account.
+- Add regression tests for crafted redirect URLs with attacker-controlled token, channel id, and redirect target parameters.
+
+## References
+
+- Chrome Web Store listing: `https://chromewebstore.google.com/detail/tubebuddy-for-youtube/mhkhmbddkmdggbhaaaodilponhnccicb`
+- Vendor website: `https://www.tubebuddy.com/`
