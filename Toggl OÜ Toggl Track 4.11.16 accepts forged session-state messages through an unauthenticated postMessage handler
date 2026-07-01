@@ -1,0 +1,176 @@
+## Title
+
+Toggl OÜ Toggl Track 4.11.16 accepts forged session-state messages through an unauthenticated postMessage handler
+
+## Affected Product
+
+- Vendor: Toggl OÜ
+- Product: Toggl Track Chrome extension
+- Chrome Web Store ID: `oejgccbfbmkkpaidnkphaiaecficdnfn`
+- Affected version: 4.11.16
+- Platform: Google Chrome / Chromium-based browsers supporting Manifest V3 extensions
+- Product URL: `https://chromewebstore.google.com/detail/toggl-track-productivity/oejgccbfbmkkpaidnkphaiaecficdnfn`
+- Source repository: `https://github.com/toggl/track-extension`
+
+## Vulnerability Type
+
+- Primary weakness: Missing origin validation in a `postMessage` message handler
+- Suggested CWE: CWE-346, Origin Validation Error
+- Alternative CWE: CWE-345, Insufficient Verification of Data Authenticity
+- Alternative CWE: CWE-863, Incorrect Authorization
+- Vulnerability class: improper message authorization / session state manipulation
+
+## Summary
+
+Toggl Track Chrome extension version 4.11.16 contains a content-script `postMessage` handler that processes session-state messages without validating `event.origin`.
+
+The handler checks that `event.source === window` and that `event.data.direction` is either `from-webapp` or `from-public-web`. These checks do not authenticate the sender. A page-level script running in the same frame can satisfy `event.source === window`, and the `direction` field is fully controlled by the message sender.
+
+As a result, an untrusted script running on a page where the affected content-script handler is active can forge messages such as `logout`, `login-success`, or `user-loaded`. These messages can trigger extension actions including clearing local session data, activating the extension state, or sending a user ID to the background verification flow.
+
+The confirmed impact is unauthorized manipulation of extension session state through forged page messages. The most direct impact is forced logout and disruption of time tracking. Additional impacts from forged activation or user ID messages depend on the background logic and account state and are not claimed as confirmed account takeover.
+
+Vendor notification is available privately on request. No technical confirmation or remediation status is included in the provided record.
+
+## Impact
+
+Successful exploitation allows an untrusted page-level script to send forged session-state messages to the Toggl Track extension content script.
+
+Potential impacts include:
+
+- Forced logout by sending a forged `logout` message, causing the extension to clear session data
+- Interruption of time tracking, which may result in lost or incomplete tracked work time
+- Repeated forced logout, creating a denial-of-service condition for the extension while the user visits affected pages
+- Forged activation signals through `login-success`
+- User ID injection into the extension's verification flow through `user-loaded`
+
+The most clearly demonstrated impact is session disruption and forced logout. The practical effect of forged `login-success` and `user-loaded` messages depends on the extension's background validation and server-side checks.
+
+This report does not claim confirmed account takeover or confirmed cross-account data corruption.
+
+## Technical Details
+
+The affected content script listens for page `message` events:
+
+```javascript
+window.addEventListener("message", e => {
+    if (e.source === window &&
+        ["from-webapp", "from-public-web"].includes(e.data.direction)) {
+
+        switch (e.data.message) {
+            case "user-loaded":
+                sendMessage({
+                    type: "VERIFY_USER",
+                    payload: { userId: e.data.userId }
+                });
+                break;
+
+            case "logout":
+                sendMessage({ type: "CLEAR_DATA" });
+                break;
+
+            case "login-success":
+                sendMessage({ type: "activate" });
+                break;
+        }
+    }
+});
+```
+
+The existing checks are not sufficient security controls:
+
+- `e.source === window` only confirms that the message came from the same window. Any script running in the main page frame can satisfy this condition.
+- `e.data.direction` is a sender-controlled string field. Any sender can set it to `from-webapp` or `from-public-web`.
+- No `event.origin` allowlist is checked before processing session-state messages.
+
+This creates the following data flow:
+
+```text
+untrusted page-level script
+    -> window.postMessage({ direction: "from-webapp", message: "logout" }, "*")
+    -> Toggl Track content script accepts message without origin validation
+    -> content script sends CLEAR_DATA to extension background
+    -> extension session state is cleared
+```
+
+Similar forged messages can reach the `login-success` and `user-loaded` branches.
+
+## Proof of Concept
+
+The following proof of concept should be performed only in a controlled browser profile.
+
+Prerequisites:
+
+1. Toggl Track version 4.11.16 is installed.
+2. The user is logged in to the extension.
+3. The affected content-script message handler is active on the current page.
+4. A test script can run in the page context.
+
+Forced logout test:
+
+```javascript
+window.postMessage({
+  direction: "from-webapp",
+  message: "logout"
+}, "*");
+```
+
+Forged activation signal:
+
+```javascript
+window.postMessage({
+  direction: "from-webapp",
+  message: "login-success"
+}, "*");
+```
+
+Forged user-loaded signal:
+
+```javascript
+window.postMessage({
+  direction: "from-webapp",
+  message: "user-loaded",
+  userId: "123456"
+}, "*");
+```
+
+Expected safe behavior:
+
+The extension should reject messages unless they originate from trusted Toggl-controlled origins or from an extension-controlled messaging channel.
+
+Observed vulnerable behavior:
+
+The content script processes the forged message based on sender-controlled message fields and triggers the corresponding extension action.
+
+## Suggested CVSS
+
+Suggested CVSS v3.1 vector:
+
+`CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:L`
+
+Suggested severity: Medium
+
+Rationale: exploitation requires the user to visit or interact with a page where an attacker-controlled script can run and where the affected content-script handler is active. The attack crosses the page-to-extension trust boundary. The confirmed integrity impact is low because forged messages can manipulate extension session state. The availability impact is low because forced logout can interrupt extension use and time tracking. No direct confidentiality impact is claimed.
+
+If VulDB scores only the forced logout behavior and not the broader session-state message forgery, a more conservative vector may be:
+
+`CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:L`
+
+## Suggested CVE Description
+
+Toggl OÜ Toggl Track Chrome extension 4.11.16 accepts forged session-state messages through an unauthenticated `postMessage` handler. The content script checks `event.source === window` and sender-controlled `event.data.direction` values, but does not validate `event.origin`. A page-level script can send forged `logout`, `login-success`, or `user-loaded` messages and trigger corresponding extension session-state actions.
+
+## Remediation Suggestions
+
+- Validate `event.origin` against a strict allowlist before processing session-state messages.
+- Accept messages only from trusted Toggl-controlled origins, such as `https://track.toggl.com` and other documented production origins.
+- Do not rely on sender-controlled fields such as `direction` as trust indicators.
+- Use an extension-controlled messaging channel where possible instead of page-context `postMessage`.
+- For `user-loaded`, validate the supplied user ID against the extension's authenticated session before taking action.
+- Add regression tests that confirm untrusted page scripts cannot trigger logout, activation, or user verification flows.
+
+## References
+
+- Chrome Web Store listing: `https://chromewebstore.google.com/detail/toggl-track-productivity/oejgccbfbmkkpaidnkphaiaecficdnfn`
+- Source repository: `https://github.com/toggl/track-extension`
+- Toggl legal terms identifying Toggl OÜ: `https://toggl.com/legal/track/terms/`
