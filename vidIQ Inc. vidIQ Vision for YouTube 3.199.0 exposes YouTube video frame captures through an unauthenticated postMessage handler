@@ -1,0 +1,144 @@
+## Title
+
+vidIQ Inc. vidIQ Vision for YouTube 3.199.0 exposes YouTube video frame captures through an unauthenticated postMessage handler
+
+## Affected Product
+
+- Vendor: vidIQ Inc.
+- Product: vidIQ Vision for YouTube Chrome extension
+- Chrome Web Store ID: `pachckjkecffpdphbpmfolblodfkgbhl`
+- Affected version: 3.199.0
+- Platform: Google Chrome / Chromium-based browsers supporting Manifest V3 extensions
+- Product URL: `https://chromewebstore.google.com/detail/vidiq-vision-for-youtube/pachckjkecffpdphbpmfolblodfkgbhl`
+- Vendor website: `https://vidiq.com/`
+
+## Vulnerability Type
+
+- Primary weakness: Missing origin validation in a `postMessage` message handler
+- Suggested CWE: CWE-346, Origin Validation Error
+- Alternative CWE: CWE-200, Exposure of Sensitive Information to an Unauthorized Actor
+- Alternative CWE: CWE-284, Improper Access Control
+- Vulnerability class: information disclosure / improper message authorization
+
+## Summary
+
+vidIQ Vision for YouTube Chrome extension version 3.199.0 contains a content-script `postMessage` handler on YouTube pages that responds to messages with `vidiqEvent: "getVideoStill"` without validating the sender origin.
+
+When the handler receives this message, it locates the YouTube video element, draws the current video frame to a canvas, converts the canvas to a base64 data URL, and returns the captured image data to the message sender with `postMessage`.
+
+Because the incoming message origin is not restricted to trusted vidIQ-controlled origins, an unauthorized page-associated script or frame that can send messages to the YouTube page can request and receive a still image of the currently playing video. This creates a video-frame disclosure channel from the trusted extension content script to an untrusted message sender.
+
+The vendor acknowledged receipt of the report and stated that the details were forwarded for internal review. No technical confirmation or remediation status was provided in the available response. Vendor response is available privately on request.
+
+## Impact
+
+Successful exploitation can disclose still frames from the YouTube video currently being viewed by the user. If triggered repeatedly, this may allow repeated sampling of video content.
+
+The practical impact depends on the attacker's ability to execute or embed script in a context that can send messages to the YouTube page where the extension content script is active. Possible sources include a separate vulnerable script execution path on YouTube, a malicious or compromised browser extension with access to YouTube pages, or an untrusted frame capable of messaging the page.
+
+Potentially exposed content includes frames from videos the user is authorized to view, such as private, unlisted, internal, or otherwise non-public YouTube videos. This report does not claim arbitrary file access, account takeover, or direct access to the user's vidIQ account. The confirmed issue is unauthorized access to extension-produced video frame captures through a missing message-origin check.
+
+## Technical Details
+
+The affected content script runs on YouTube pages and registers a `message` event listener. The listener checks only the message data field `vidiqEvent` and does not validate `event.origin` before performing the frame capture.
+
+The relevant logic is:
+
+```javascript
+window.addEventListener("message", e => {
+    if (e.data.vidiqEvent && e.data.vidiqEvent === "getVideoStill") {
+        const video = document.getElementsByClassName("html5-main-video")[0];
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        e.source.postMessage({
+            ...e.data,
+            vidiqEvent: "postVideoStill",
+            image: canvas.toDataURL()
+        }, e.origin);
+    }
+}, false);
+```
+
+Two controls are missing:
+
+- The handler does not validate `event.origin` against a trusted allowlist before processing `getVideoStill`.
+- The response is sent back to `event.source` using `event.origin`, which returns the captured image data to the requester rather than to a fixed trusted vidIQ origin.
+
+The resulting data flow is:
+
+```text
+untrusted page-associated sender
+    -> postMessage({ vidiqEvent: "getVideoStill" })
+    -> vidIQ content script accepts message without origin validation
+    -> current YouTube video frame is drawn to canvas
+    -> canvas is converted to a base64 data URL
+    -> image data is returned to the sender with postMessage
+```
+
+This behavior allows a message sender that should not be trusted by the extension to invoke a privileged content-script capability and receive video image data.
+
+## Proof of Concept
+
+The following proof of concept is intentionally minimal and should be used only in a controlled test environment on a test video.
+
+Prerequisites:
+
+1. vidIQ Vision for YouTube version 3.199.0 is installed.
+2. A YouTube video is open and playing.
+3. A test script can run in a page-associated context capable of sending messages to the YouTube page.
+
+Minimal test code:
+
+```javascript
+window.addEventListener("message", event => {
+    if (event.data && event.data.vidiqEvent === "postVideoStill") {
+        console.log("Received captured frame data URL length:", event.data.image.length);
+        console.log(event.data.image.slice(0, 64));
+    }
+});
+
+window.postMessage({
+    vidiqEvent: "getVideoStill"
+}, "*");
+```
+
+Expected safe behavior:
+
+The extension should ignore the request unless it originates from a trusted vidIQ-controlled origin or an extension-controlled messaging channel.
+
+Observed vulnerable behavior:
+
+The extension processes the message and returns a `postVideoStill` response containing a base64-encoded image of the current video frame.
+
+## Suggested CVSS
+
+Suggested CVSS v3.1 vector:
+
+`CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N`
+
+Suggested severity: Medium
+
+Rationale: exploitation requires the user to have the extension installed and to view a YouTube page where an attacker-controlled script or frame can send messages to the content script. The attack crosses the page-to-extension trust boundary. The confidentiality impact can be high when frames from private, unlisted, internal, or otherwise sensitive videos are disclosed. No integrity or availability impact is claimed.
+
+If VulDB scores only the direct disclosure of a single video still image, a more conservative vector may be:
+
+`CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:N/A:N`
+
+## Suggested CVE Description
+
+vidIQ Inc. vidIQ Vision for YouTube Chrome extension 3.199.0 exposes YouTube video frame captures through an unauthenticated `postMessage` handler. A content script on YouTube pages accepts messages with `vidiqEvent: "getVideoStill"` without validating `event.origin`, captures the current frame of the YouTube video using canvas, and returns the base64 image data to the message sender.
+
+## Remediation Suggestions
+
+- Validate `event.origin` before processing `getVideoStill` messages.
+- Accept frame capture requests only from trusted vidIQ-controlled origins or from extension-controlled contexts.
+- Do not send captured frame data back to arbitrary message senders.
+- Use a fixed trusted target origin for any `postMessage` response containing image data.
+- Prefer `chrome.runtime.sendMessage` or another extension-only messaging channel if frame capture is only needed by the extension UI.
+- Add rate limiting or user-visible controls to prevent repeated frame capture.
+
+## References
+
+- Chrome Web Store listing: `https://chromewebstore.google.com/detail/vidiq-vision-for-youtube/pachckjkecffpdphbpmfolblodfkgbhl`
+- Vendor website: `https://vidiq.com/`
+- Vendor response: available privately on request
